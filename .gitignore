@@ -1,0 +1,10 @@
+node_modules/
+out/
+dist/
+release/
+test-results/
+playwright-report/
+.env*
+*.log
+electron-runtime.zip
+electron-SHASUMS256.txt

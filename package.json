@@ -1,0 +1,68 @@
+{
+  "name": "random-speech",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first random speech training desktop app",
+  "main": "out/main/index.js",
+  "author": "random-speech contributors",
+  "license": "UNLICENSED",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "npm run typecheck && electron-vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:docs": "powershell -NoProfile -ExecutionPolicy Bypass -File tests/validate-docs.tests.ps1",
+    "test:e2e": "npm run build && playwright test",
+    "package": "npm run build && electron-builder --win nsis --x64",
+    "postinstall": "electron-builder install-app-deps",
+    "test:integration": "node tests/integration/run.mjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.6.2",
+    "lucide-react": "^0.577.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-router-dom": "^7.13.1",
+    "zod": "^4.3.6",
+    "zustand": "^5.0.11"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@testing-library/react": "^16.3.2",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.10.13",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
+    "electron": "^41.10.3",
+    "electron-builder": "^26.8.1",
+    "electron-vite": "^5.0.0",
+    "jsdom": "^28.1.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "vitest": "^4.0.18"
+  },
+  "build": {
+    "appId": "com.randomspeech.trainer",
+    "productName": "随机演讲训练器",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**/*"
+    ],
+    "win": {
+      "target": "nsis",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false
+    }
+  }
+}

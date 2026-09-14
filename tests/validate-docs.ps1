@@ -92,7 +92,7 @@ function Assert-MarkdownDocument {
 }
 
 $documentPaths = @(
-    (Join-Path $projectRoot 'product-design.md'),
+    (Join-Path $projectRoot 'docs/product-design.md'),
     (Join-Path $projectRoot 'docs/technical-design.md')
 )
 $documentPaths += @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'docs') -Filter '*.md' -File -Recurse | ForEach-Object { $_.FullName })

@@ -23,7 +23,7 @@ $validDocument = @'
 | Not a table |
 ```
 
-[Product](../product-design.md)
+[Product](../docs/product-design.md)
 '@
 
 $testCount = 0
@@ -37,7 +37,7 @@ $testCount++
 $invalidCases = @(
     @{ Name = 'broken table'; Text = $validDocument.Replace('| C | D | E |', '| C | D |'); Expected = 'Inconsistent table columns' },
     @{ Name = 'invalid separator'; Text = $validDocument.Replace('| --- | --- | --- |', '| --- | bad | --- |'); Expected = 'Invalid table separator' },
-    @{ Name = 'broken local link'; Text = $validDocument.Replace('../product-design.md', '../missing-design-for-test.md'); Expected = 'Broken local link' },
+    @{ Name = 'broken local link'; Text = $validDocument.Replace('../docs/product-design.md', '../missing-design-for-test.md'); Expected = 'Broken local link' },
     @{ Name = 'unclosed fence'; Text = $validDocument + "`n``````text`nunfinished"; Expected = 'Unclosed code fence' },
     @{ Name = 'heading skip'; Text = $validDocument.Replace('## First table', '### First table'); Expected = 'Skipped heading level' },
     @{ Name = 'duplicate heading'; Text = $validDocument.Replace('## Second table', '## First table'); Expected = 'Duplicate heading' },
