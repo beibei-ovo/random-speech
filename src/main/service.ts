@@ -4,8 +4,15 @@ import { join } from "node:path";
 import { Store } from "./store";
 import { TrainingClock } from "./timer";
 import { Provider, type ProviderConfig } from "./provider";
+import { calculateDerivedMetrics } from "../shared/metrics";
 import topics from "../../resources/topics.json";
-import type { Attempt, Revision, Snapshot } from "../shared/types";
+import type {
+  Attempt,
+  Revision,
+  Snapshot,
+  AudioSummary,
+  TranscriptionResult,
+} from "../shared/types";
 export class TrainingService {
   clock = new TrainingClock();
   recording: {
@@ -186,6 +193,7 @@ export class TrainingService {
     durationMs: number,
     audible: boolean,
     interrupted: boolean,
+    audioSummary?: AudioSummary,
   ) {
     const r = this.recording;
     if (!r || r.id !== id) throw new Error("录音已经结束。");
@@ -201,6 +209,7 @@ export class TrainingService {
       this.recording = null;
     }
     a.durationMs = durationMs;
+    a.audioSummary = audioSummary;
     a.status =
       interrupted || !audible || a.bytes < 100 ? "interrupted" : "review";
     a.error = interrupted
@@ -228,25 +237,30 @@ export class TrainingService {
       (a.status === "interrupted" && a.error?.includes("有效声音"))
     )
       throw new Error("录音无效，请重录。");
-    return this.runTask(a, async (provider, signal) => {
+    return this.runTask(a, async (provider, signal, taskConfig) => {
       let revision = this.store
         .detail(a.sessionId)
         .revisions.filter((r) => r.attemptId === id)
         .at(-1);
       if (!revision) {
         this.store.job(`${id}:asr`, id, "running", { type: "asr" });
-        const text = await provider.transcribe(
+        const result = await provider.transcribe(
           join(this.store.audioDir, a.audioPath),
           a.mime,
           signal,
+          a.durationMs,
         );
-        revision = this.store.revision(this.store.attempt(id), text, "asr");
+        revision = this.store.revision(
+          this.store.attempt(id),
+          result as TranscriptionResult,
+          "asr",
+        );
         this.store.job(`${id}:asr`, id, "done", { revision: revision.id });
       }
       const existing = this.store
         .detail(a.sessionId)
         .runs.some((r) => r.revisionId === revision.id);
-      if (!existing) await this.feedback(provider, a, revision, signal);
+      if (!existing) await this.feedback(provider, a, revision, signal, taskConfig);
     });
   }
   analyze(id: string, text: string, consent: boolean) {
@@ -262,8 +276,8 @@ export class TrainingService {
       text === previous.text
         ? previous
         : this.store.revision(a, text, "edited");
-    return this.runTask(a, async (provider, signal) => {
-      await this.feedback(provider, a, revision, signal);
+    return this.runTask(a, async (provider, signal, taskConfig) => {
+      await this.feedback(provider, a, revision, signal, taskConfig);
     });
   }
   async feedback(
@@ -271,6 +285,7 @@ export class TrainingService {
     a: Attempt,
     revision: Revision,
     signal: AbortSignal,
+    taskConfig: ProviderConfig = this.config(),
   ) {
     const key = `${a.id}:feedback:${revision.id}`;
     this.store.job(key, a.id, "running", { revision: revision.id });
@@ -279,6 +294,17 @@ export class TrainingService {
       a.outline,
       revision.text,
       signal,
+      {
+        audioSummary: a.audioSummary,
+        derivedMetrics: calculateDerivedMetrics(
+          revision.text,
+          a.durationMs,
+          a.audioSummary,
+          revision.timing,
+          revision.segments,
+        ),
+        timing: revision.timing,
+      },
     );
     this.store.attempt(a.id);
     this.store.run({
@@ -286,11 +312,27 @@ export class TrainingService {
       attemptId: a.id,
       revisionId: revision.id,
       result,
-      model:
-        this.config().mode === "demo"
+      service:
+        taskConfig.mode === "demo"
           ? "离线演示"
-          : this.config().feedbackModel,
+          : taskConfig.feedback?.providerName,
+      model:
+        taskConfig.mode === "demo"
+          ? "离线演示"
+          : taskConfig.feedback?.model || "unknown",
+      adapterVersion:
+        taskConfig.mode === "demo"
+          ? "demo-v1"
+          : taskConfig.feedback?.adapterVersion,
       promptVersion: "feynman-v1",
+      audioSummaryVersion: a.audioSummary?.algorithmVersion,
+      derivedMetrics: calculateDerivedMetrics(
+        revision.text,
+        a.durationMs,
+        a.audioSummary,
+        revision.timing,
+        revision.segments,
+      ),
       createdAt: new Date().toISOString(),
     });
     this.store.job(key, a.id, "done", { revision: revision.id });
@@ -298,17 +340,22 @@ export class TrainingService {
   }
   runTask(
     a: Attempt,
-    work: (provider: Provider, signal: AbortSignal) => Promise<void>,
+    work: (
+      provider: Provider,
+      signal: AbortSignal,
+      config: ProviderConfig,
+    ) => Promise<void>,
   ) {
     a.submitted = true;
     a.status = "processing";
     a.error = undefined;
     this.store.saveAttempt(a);
     const controller = new AbortController();
+    const taskConfig = this.config();
     const start = performance.now();
     const promise = Promise.resolve().then(async () => {
       try {
-        await work(new Provider(this.config()), controller.signal);
+        await work(new Provider(taskConfig), controller.signal, taskConfig);
         const latest = this.store.attempt(a.id);
         latest.status = "feedback";
         latest.error = undefined;

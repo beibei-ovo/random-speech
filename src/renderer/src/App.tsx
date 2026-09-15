@@ -687,7 +687,9 @@ function Consent({
       <span>
         {settings?.mode === "demo"
           ? "使用离线演示：不上传内容，转写与反馈是示例，不代表实际录音。"
-          : `我同意将${textOnly ? "当前转写文字" : "录音用于转写、转写文字用于表达分析"}发送至 ${settings?.providerName || "配置的服务"}（${settings?.baseUrl || ""}）。${settings?.retention || "留存政策待确认。"} 分析格式修复最多自动追加一次请求，可能产生费用。`}
+          : textOnly
+            ? `我同意将当前转写文字和本地指标发送至 ${settings?.feedback.recipient}（${settings?.feedback.baseUrl}），${settings?.feedback.retention || "留存政策待确认。"}`
+            : `我同意将录音发送至 ${settings?.transcription.recipient}（${settings?.transcription.baseUrl}）进行转写，再将转写文字和本地指标发送至 ${settings?.feedback.recipient}（${settings?.feedback.baseUrl}）进行表达分析。两项留存政策分别为：${settings?.transcription.retention || "待确认"}；${settings?.feedback.retention || "待确认"}。可能产生费用。`}
       </span>
     </label>
   );
@@ -1118,7 +1120,8 @@ function HistoryPage() {
 }
 function SettingsPage() {
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [key, setKey] = useState("");
+  const [transcriptionKey, setTranscriptionKey] = useState("");
+  const [feedbackKey, setFeedbackKey] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   useEffect(() => {
@@ -1133,7 +1136,7 @@ function SettingsPage() {
         单设备使用，无需注册。AI 服务只在确认提交后调用。
       </p>
       <section className={`${s.panel} ${s.settings}`}>
-        <h2>转写与分析服务</h2>
+        <h2>服务配置</h2>
         <label>
           运行模式
           <select
@@ -1150,35 +1153,51 @@ function SettingsPage() {
           </select>
         </label>
         <div className={s.notice}>
-          云端支持 /audio/transcriptions 和 /chat/completions
-          兼容接口，音频格式为
-          WebM/Opus。请先向服务商确认支持的模型、费用及留存政策。
+          转写和评价使用独立连接。multipart-asr-v1 适用于专用 ASR；
+          multimodal-chat-audio-v1 适用于支持音频输入的多模态接口；
+          chat-json-v1 用于结构化文字评价。
         </div>
-        {[
-          ["providerName", "接收方名称"],
-          ["baseUrl", "HTTPS API 地址"],
-          ["asrModel", "语音识别模型"],
-          ["feedbackModel", "文字分析模型"],
-          ["retention", "数据留存说明"],
-        ].map(([field, label]) => (
-          <label key={field}>
-            {label}
-            <input
-              value={settings[field as keyof Settings] as string}
-              onChange={(e) =>
-                setSettings({ ...settings, [field]: e.target.value })
-              }
-            />
-          </label>
-        ))}
-        <label>
-          API Key {settings.hasKey ? "（已配置，留空保留）" : ""}
+        <ServiceSettings
+          title="语音转写"
+          value={settings.transcription}
+          hasKey={settings.transcriptionHasKey}
+          apiKey={transcriptionKey}
+          setApiKey={setTranscriptionKey}
+          onChange={(transcription) => setSettings({ ...settings, transcription })}
+        />
+        <ServiceSettings
+          title="演讲评价"
+          value={settings.feedback}
+          hasKey={settings.feedbackHasKey}
+          apiKey={feedbackKey}
+          setApiKey={setFeedbackKey}
+          onChange={(feedback) => setSettings({ ...settings, feedback })}
+        />
+        <label className={s.consent}>
           <input
-            type="password"
+            type="checkbox"
+            checked={settings.reuseTranscriptionConnection}
+            onChange={(e) =>
+              setSettings({
+                ...settings,
+                reuseTranscriptionConnection: e.target.checked,
+              })
+            }
+          />
+          <span>评价复用转写地址、接收方和密钥引用（评价适配器与模型仍独立）。</span>
+        </label>
+        <p className={s.muted}>
+          保存不会发送测试请求。密钥仅传给主进程，不会进入 renderer、任务快照或日志。
+        </p>
+        <label>
+          {settings.transcriptionHasKey || settings.feedbackHasKey
+            ? "API Key 已配置（分别留空保留）"
+            : "API Key 尚未配置"}
+          <input
+            type="hidden"
             autoComplete="off"
-            value={key}
-            placeholder="仅传给主进程，不回显已有密钥"
-            onChange={(e) => setKey(e.target.value)}
+            value=""
+            readOnly
           />
         </label>
         <p className={s.muted}>
@@ -1192,10 +1211,15 @@ function SettingsPage() {
             onClick={() => {
               setBusy(true);
               void window.api
-                .saveSettings({ ...settings, ...(key ? { key } : {}) })
+                .saveSettings({
+                  ...settings,
+                  ...(transcriptionKey ? { transcriptionKey } : {}),
+                  ...(feedbackKey ? { feedbackKey } : {}),
+                })
                 .then((v) => {
                   setSettings(v);
-                  setKey("");
+                  setTranscriptionKey("");
+                  setFeedbackKey("");
                   setMessage("设置已保存。");
                 })
                 .catch((e) => setMessage(errorMessage(e)))
@@ -1205,13 +1229,17 @@ function SettingsPage() {
             保存设置
             <Check size={17} />
           </Button>
-          {settings.hasKey && (
+          {(settings.transcriptionHasKey || settings.feedbackHasKey) && (
             <Button
               secondary
               disabled={busy}
               onClick={() => {
                 void window.api
-                  .saveSettings({ ...settings, key: "" })
+                  .saveSettings({
+                    ...settings,
+                    transcriptionKey: "",
+                    feedbackKey: "",
+                  })
                   .then((v) => {
                     setSettings(v);
                     setMessage("密钥已清除。");
@@ -1226,6 +1254,55 @@ function SettingsPage() {
         {message && <p role="status">{message}</p>}
       </section>
     </div>
+  );
+}
+function ServiceSettings({
+  title,
+  value,
+  hasKey,
+  apiKey,
+  setApiKey,
+  onChange,
+}: {
+  title: string;
+  value: Settings["transcription"];
+  hasKey: boolean;
+  apiKey: string;
+  setApiKey: (value: string) => void;
+  onChange: (value: Settings["transcription"]) => void;
+}) {
+  return (
+    <fieldset className={s.serviceGroup}>
+      <legend>{title}</legend>
+      {(
+        [
+          ["providerName", "服务商名称"],
+          ["adapterId", "接口适配器"],
+          ["baseUrl", "HTTPS API 地址"],
+          ["model", "模型"],
+          ["recipient", "接收方"],
+          ["retention", "数据留存说明"],
+        ] as const
+      ).map(([field, label]) => (
+        <label key={field}>
+          {label}
+          <input
+            value={value[field]}
+            onChange={(e) => onChange({ ...value, [field]: e.target.value })}
+          />
+        </label>
+      ))}
+      <label>
+        API Key {hasKey ? "（已配置，留空保留）" : ""}
+        <input
+          type="password"
+          autoComplete="off"
+          value={apiKey}
+          placeholder="仅传给主进程，不回显已有密钥"
+          onChange={(e) => setApiKey(e.target.value)}
+        />
+      </label>
+    </fieldset>
   );
 }
 function Floating() {

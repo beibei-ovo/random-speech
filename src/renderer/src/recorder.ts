@@ -1,4 +1,5 @@
 import type { Attempt } from "../../shared/types";
+import { createAudioSummary } from "../../shared/metrics";
 export class Recorder {
   media: MediaRecorder | null = null;
   stream: MediaStream | null = null;
@@ -12,6 +13,7 @@ export class Recorder {
   queue = Promise.resolve();
   pending = 0;
   seq = 0;
+  samples: Array<{ atMs: number; rms: number; peak: number }> = [];
   constructor(
     private onDone: (a: Attempt) => void,
     private onError: (s: string) => void,
@@ -39,6 +41,13 @@ export class Recorder {
         const rms = Math.sqrt(
           samples.reduce((s, x) => s + x * x, 0) / samples.length,
         );
+        const peak = samples.reduce((max, x) => Math.max(max, Math.abs(x)), 0);
+        if (this.startTime)
+          this.samples.push({
+            atMs: Math.max(0, performance.now() - this.startTime),
+            rms,
+            peak,
+          });
         if (rms > 0.006) this.audible = true;
         this.onLevel(Math.min(1, rms * 8));
         if (this.startTime && performance.now() - this.startTime >= 120000)
@@ -120,6 +129,10 @@ export class Recorder {
   async complete() {
     const duration = performance.now() - this.startTime;
     await this.queue;
+    const audioSummary = createAudioSummary({
+      durationMs: duration,
+      rmsSamples: this.samples,
+    });
     this.cleanup();
     try {
       this.onDone(
@@ -128,6 +141,7 @@ export class Recorder {
           duration,
           this.audible,
           this.interrupted || this.writeError,
+          audioSummary,
         ),
       );
     } catch {

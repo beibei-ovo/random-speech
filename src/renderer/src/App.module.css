@@ -886,6 +886,18 @@ h3 {
 .settings {
   max-width: 690px;
 }
+.serviceGroup {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 16px;
+  margin: 14px 0;
+}
+.serviceGroup legend {
+  padding: 0 8px;
+  font-weight: 700;
+}
 .settings > label {
   display: flex;
   flex-direction: column;

@@ -9,7 +9,15 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { Session, Attempt, Revision, Run, Detail } from "../shared/types";
+import {
+  transcriptionResultSchema,
+  type Session,
+  type Attempt,
+  type Revision,
+  type Run,
+  type Detail,
+  type TranscriptionResult,
+} from "../shared/types";
 export class Store {
   db: Database.Database;
   audioDir: string;
@@ -21,7 +29,7 @@ export class Store {
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
     const version = this.db.pragma("user_version", { simple: true }) as number;
-    if (version > 1)
+    if (version > 2)
       throw new Error("数据库版本高于当前应用，请使用较新版本。");
     this.db.transaction(() => {
       this.db.exec(`
@@ -32,10 +40,31 @@ export class Store {
         CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL REFERENCES attempts(id) ON DELETE CASCADE, status TEXT NOT NULL, data TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, type TEXT NOT NULL, elapsed INTEGER, created TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS settings (id TEXT PRIMARY KEY, value TEXT NOT NULL);
-        PRAGMA user_version = 1;
       `);
+      this.migrate(version);
     })();
     this.recover();
+  }
+  private migrate(version: number) {
+    if (version < 2) {
+      for (const row of this.db.prepare("SELECT id, data FROM revisions").all() as {
+        id: string;
+        data: string;
+      }[]) {
+        const revision = JSON.parse(row.data) as Partial<Revision>;
+        const normalized = {
+          ...revision,
+          timing: revision.timing || { segment: "missing", word: "missing" },
+          alignmentStatus:
+            revision.alignmentStatus ||
+            (revision.source === "edited" ? "needs_realign" : "missing"),
+        };
+        this.db
+          .prepare("UPDATE revisions SET data=? WHERE id=?")
+          .run(JSON.stringify(normalized), row.id);
+      }
+    }
+    this.db.pragma("user_version = 2");
   }
   setting(key: string): string | undefined {
     return (
@@ -112,19 +141,52 @@ export class Store {
     ).map((r) => JSON.parse(r.data) as Run);
     return { session, attempts, revisions, runs };
   }
-  revision(a: Attempt, text: string, source: Revision["source"]) {
+  revision(
+    a: Attempt,
+    value: string | TranscriptionResult,
+    source: Revision["source"],
+  ) {
     this.session(a.sessionId);
     const all = this.detail(a.sessionId).revisions.filter(
       (r) => r.attemptId === a.id,
     );
     if (source === "asr" && all.some((r) => r.source === "asr"))
       throw new Error("原始转写不能覆盖。");
+    const result =
+      typeof value === "string"
+        ? transcriptionResultSchema.parse({
+            text: value,
+            timing: { segment: "missing", word: "missing" },
+            providerMeta: {
+              provider: "unknown",
+              model: "unknown",
+              adapterVersion: "unknown",
+            },
+          })
+        : transcriptionResultSchema.parse(value);
     const revision: Revision = {
       id: randomUUID(),
       attemptId: a.id,
-      text,
+      text: result.text,
       source,
       version: all.length + 1,
+      providerMeta: source === "asr" ? result.providerMeta : undefined,
+      segments: source === "asr" ? result.segments : undefined,
+      words: source === "asr" ? result.words : undefined,
+      timing:
+        source === "asr"
+          ? result.timing
+          : { segment: "missing", word: "missing" },
+      alignmentStatus:
+        source === "edited"
+          ? "needs_realign"
+          : result.timing.segment === "invalid" ||
+              result.timing.word === "invalid"
+            ? "invalid"
+            : result.timing.segment === "available" ||
+                result.timing.word === "available"
+              ? "available"
+              : "missing",
       createdAt: new Date().toISOString(),
     };
     this.db

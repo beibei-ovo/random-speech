@@ -19,7 +19,11 @@ import { readFileSync } from "node:fs";
 import { z } from "zod";
 import { Store } from "./store";
 import { TrainingService } from "./service";
-import { settingsSchema } from "../shared/types";
+import {
+  settingsSchema,
+  audioSummarySchema,
+  type ServiceConfig,
+} from "../shared/types";
 import { localAsset, audioRange } from "./security";
 import topics from "../../resources/topics.json";
 protocol.registerSchemesAsPrivileged([
@@ -46,13 +50,22 @@ let tray: Tray;
 let service: TrainingService;
 let quitting = false;
 let permitUntil = 0;
+const defaultService = (
+  kind: "transcription" | "feedback",
+): Omit<ServiceConfig, "credentialRef"> => ({
+  providerName: "OpenAI（或自行配置的兼容服务）",
+  adapterId: kind === "transcription" ? "multipart-asr-v1" : "chat-json-v1",
+  baseUrl: "https://api.openai.com/v1",
+  model: kind === "transcription" ? "whisper-1" : "gpt-4o-mini",
+  recipient: "OpenAI（或自行配置的兼容服务）",
+  retention: "留存期限待向所选服务商确认；请勿提交敏感信息。",
+  adapterVersion: "v1",
+});
 const defaults = {
   mode: "demo" as const,
-  baseUrl: "https://api.openai.com/v1",
-  asrModel: "whisper-1",
-  feedbackModel: "gpt-4o-mini",
-  providerName: "OpenAI（或自行配置的兼容服务）",
-  retention: "留存期限待向所选服务商确认；请勿提交敏感信息。",
+  transcription: { ...defaultService("transcription"), credentialRef: "transcription" },
+  feedback: { ...defaultService("feedback"), credentialRef: "feedback" },
+  reuseTranscriptionConnection: false,
 };
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
@@ -62,25 +75,61 @@ else {
   });
   app.whenReady().then(async () => {
     const store = new Store(join(app.getPath("userData"), "training"));
-    let config = {
-      ...defaults,
-      ...JSON.parse(store.setting("config") || "{}"),
-    } as z.infer<typeof settingsSchema>;
-    let key = "";
-    try {
-      if (safeStorage.isEncryptionAvailable() && store.setting("key"))
-        key = safeStorage.decryptString(
-          Buffer.from(store.setting("key")!, "base64"),
-        );
-    } catch {
-      /* Key must be re-entered after OS account changes. */
-    }
+    const rawConfig = (() => {
+      try {
+        return JSON.parse(store.setting("config") || "{}");
+      } catch {
+        return {};
+      }
+    })();
+    const oldConfig = rawConfig as Record<string, unknown>;
+    const oldService = {
+      ...defaultService("transcription"),
+      credentialRef: "transcription",
+      ...(typeof oldConfig.baseUrl === "string" ? { baseUrl: oldConfig.baseUrl } : {}),
+      ...(typeof oldConfig.providerName === "string" ? { providerName: oldConfig.providerName, recipient: oldConfig.providerName } : {}),
+      ...(typeof oldConfig.retention === "string" ? { retention: oldConfig.retention } : {}),
+      ...(typeof oldConfig.asrModel === "string" ? { model: oldConfig.asrModel } : {}),
+    };
+    const oldFeedback = {
+      ...defaultService("feedback"),
+      credentialRef: "feedback",
+      ...(typeof oldConfig.baseUrl === "string" ? { baseUrl: oldConfig.baseUrl } : {}),
+      ...(typeof oldConfig.providerName === "string" ? { providerName: oldConfig.providerName, recipient: oldConfig.providerName } : {}),
+      ...(typeof oldConfig.retention === "string" ? { retention: oldConfig.retention } : {}),
+      ...(typeof oldConfig.feedbackModel === "string" ? { model: oldConfig.feedbackModel } : {}),
+    };
+    let config = settingsSchema.parse({
+      mode: oldConfig.mode === "cloud" ? "cloud" : "demo",
+      transcription: { ...oldService, ...(typeof oldConfig.transcription === "object" ? oldConfig.transcription : {}) },
+      feedback: { ...oldFeedback, ...(typeof oldConfig.feedback === "object" ? oldConfig.feedback : {}) },
+      reuseTranscriptionConnection: oldConfig.reuseTranscriptionConnection === true,
+    });
+    const decrypt = (value: string | undefined) => {
+      try {
+        return safeStorage.isEncryptionAvailable() && value
+          ? safeStorage.decryptString(Buffer.from(value, "base64"))
+          : "";
+      } catch {
+        return "";
+      }
+    };
+    const legacyKey = decrypt(store.setting("key"));
+    let transcriptionKey = decrypt(store.setting("key:transcription")) || legacyKey;
+    let feedbackKey = decrypt(store.setting("key:feedback")) || legacyKey;
     const settings = () => ({
       ...config,
-      hasKey: !!key,
+      transcriptionHasKey: !!transcriptionKey,
+      feedbackHasKey: !!feedbackKey,
+      hasKey: !!(transcriptionKey || feedbackKey),
       persistentKey: safeStorage.isEncryptionAvailable(),
     });
-    service = new TrainingService(store, () => ({ ...config, key }));
+    service = new TrainingService(store, () => ({
+      ...config,
+      transcription: { ...config.transcription, key: transcriptionKey },
+      feedback: { ...config.feedback, key: feedbackKey },
+      key: transcriptionKey,
+    }));
     const renderer = join(__dirname, "../renderer");
     protocol.handle("speech", async (request) => {
       try {
@@ -359,6 +408,9 @@ else {
               z.number().min(0).max(3600000).parse(args[1]),
               z.boolean().parse(args[2]),
               z.boolean().parse(args[3]),
+              args[4] === undefined
+                ? undefined
+                : audioSummarySchema.parse(args[4]),
             );
           case "discard":
             return service.discard(id());
@@ -387,19 +439,37 @@ else {
             if (service.tasks.size)
               throw new Error("请等待当前分析完成后更改服务。");
             const input = settingsSchema
-              .extend({ key: z.string().max(2000).optional() })
+              .extend({
+                transcriptionKey: z.string().max(2000).optional(),
+                feedbackKey: z.string().max(2000).optional(),
+                key: z.string().max(2000).optional(),
+              })
               .parse(args[0]);
-            const { key: newKey, ...next } = input;
+            const {
+              transcriptionKey: newTranscriptionKey,
+              feedbackKey: newFeedbackKey,
+              key: legacyNewKey,
+              ...next
+            } = input;
             config = next;
-            if (newKey !== undefined) {
-              key = newKey;
-              store.setSetting(
-                "key",
-                safeStorage.isEncryptionAvailable() && key
-                  ? safeStorage.encryptString(key).toString("base64")
-                  : "",
-              );
+            const encrypt = (value: string | undefined) =>
+              safeStorage.isEncryptionAvailable() && value
+                ? safeStorage.encryptString(value).toString("base64")
+                : "";
+            if (newTranscriptionKey !== undefined)
+              transcriptionKey = newTranscriptionKey;
+            if (newFeedbackKey !== undefined) feedbackKey = newFeedbackKey;
+            if (legacyNewKey !== undefined) {
+              transcriptionKey = legacyNewKey;
+              feedbackKey = legacyNewKey;
             }
+            if (
+              newTranscriptionKey !== undefined ||
+              legacyNewKey !== undefined
+            )
+              store.setSetting("key:transcription", encrypt(transcriptionKey));
+            if (newFeedbackKey !== undefined || legacyNewKey !== undefined)
+              store.setSetting("key:feedback", encrypt(feedbackKey));
             store.setSetting("config", JSON.stringify(config));
             return settings();
           }
