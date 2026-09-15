@@ -62,4 +62,23 @@ foreach ($testCase in $invalidCases) {
     $testCount++
 }
 
-Write-Output "PASS: $testCount documentation validator regression cases."
+$technicalPath = Join-Path $projectRoot 'docs/technical-design.md'
+$technicalDocument = Get-Content -LiteralPath $technicalPath -Raw -Encoding UTF8
+$technicalRequirements = @(
+    @{ Name = 'dedicated ASR'; Pattern = '\u4e13\u7528 ASR' },
+    @{ Name = 'local audio metrics'; Pattern = 'Web Audio \u5206\u6790' },
+    @{ Name = 'relative volume'; Pattern = 'RMS.*\u76f8\u5bf9\u632f\u5e45' },
+    @{ Name = 'segment timestamps'; Pattern = '\u5206\u6bb5\u65f6\u95f4\u6233' },
+    @{ Name = 'timestamp fallback'; Pattern = '\u4e0d\u901a\u8fc7\u63d0\u793a\u8bcd\u8981\u6c42\u6a21\u578b\u731c\u6d4b' },
+    @{ Name = 'four feedback dimensions'; Pattern = '\u6f14\u8bb2\u8868\u73b0.*\u8bed\u901f\u3001\u505c\u987f\u3001\u586b\u5145\u8bcd' },
+    @{ Name = 'multimodal second opinion boundary'; Pattern = '\u591a\u6a21\u6001\u6a21\u578b\u53ef\u4ee5\u4f5c\u4e3a\u53ef\u9009\u7684\u7b2c\u4e8c\u610f\u89c1' },
+    @{ Name = 'text-only correction reanalysis'; Pattern = '\u53ea\u91cd\u65b0\u5206\u6790\u6587\u672c\uff0c\u590d\u7528\u540c\u4e00 attempt \u7684\u97f3\u9891\u6307\u6807' }
+)
+foreach ($requirement in $technicalRequirements) {
+    if (-not [regex]::IsMatch($technicalDocument, $requirement.Pattern, [System.Text.RegularExpressions.RegexOptions]::Singleline)) {
+        throw "Technical design contract missing: $($requirement.Name)"
+    }
+    $testCount++
+}
+
+Write-Output "PASS: $testCount documentation validator and technical design regression cases."
